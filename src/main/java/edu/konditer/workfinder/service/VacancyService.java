@@ -3,63 +3,74 @@ package edu.konditer.workfinder.service;
 import edu.konditer.events.VacancyCreatedEvent;
 import edu.konditer.events.VacancyDeletedEvent;
 import edu.konditer.workfinder.config.RabbitMQConfig;
-import edu.konditer.workfinder.storage.InMemoryStorage;
+import edu.konditer.workfinder.entity.User;
+import edu.konditer.workfinder.entity.Vacancy;
+import edu.konditer.workfinder.mapper.VacancyMapper;
+import edu.konditer.workfinder.repository.VacancyRepository;
 import edu.konditer.workfinder_contracts.dto.PagedResponse;
-import edu.konditer.workfinder_contracts.dto.UserResponse;
 import edu.konditer.workfinder_contracts.dto.VacancyRequest;
 import edu.konditer.workfinder_contracts.dto.VacancyResponse;
 import edu.konditer.workfinder_contracts.exception.ResourceNotFoundException;
 import org.springframework.amqp.rabbit.core.RabbitTemplate;
+import org.springframework.data.domain.Page;
+import org.springframework.data.domain.PageRequest;
+import org.springframework.data.domain.Pageable;
+import org.springframework.data.domain.Sort;
 import org.springframework.stereotype.Service;
+import org.springframework.transaction.annotation.Transactional;
 
 import java.time.LocalDateTime;
 import java.util.List;
-import java.util.Optional;
-import java.util.stream.Stream;
 
 @Service
 public class VacancyService {
-    private final InMemoryStorage storage;
+    private final VacancyRepository vacancyRepository;
+    private final VacancyMapper vacancyMapper;
     private final UserService userService;
     private final RabbitTemplate rabbitTemplate;
 
-    public VacancyService(InMemoryStorage storage, UserService userService, RabbitTemplate rabbitTemplate) {
-        this.storage = storage;
+    public VacancyService(VacancyRepository vacancyRepository, VacancyMapper vacancyMapper, UserService userService, RabbitTemplate rabbitTemplate) {
+        this.vacancyRepository = vacancyRepository;
+        this.vacancyMapper = vacancyMapper;
         this.userService = userService;
         this.rabbitTemplate = rabbitTemplate;
     }
 
     public VacancyResponse findVacancyById(Long id) {
-        return Optional.ofNullable(storage.vacancies.get(id))
+        Vacancy vacancy = vacancyRepository.findById(id)
                 .orElseThrow(() -> new ResourceNotFoundException("Vacancy", id));
+        return vacancyMapper.toResponse(vacancy);
     }
 
     public PagedResponse<VacancyResponse> findAllVacancies(Long userId, int page, int size) {
-        Stream<VacancyResponse> vacancyResponseStream = storage.vacancies.values().stream()
-                .sorted((v0, v1) -> v0.getId().compareTo(v1.getId()));
+        Pageable pageable = PageRequest.of(page, size, Sort.by(Sort.Direction.DESC, "createdAt"));
+        Page<Vacancy> vacancyPage;
 
         if (userId != null) {
-            vacancyResponseStream = vacancyResponseStream.filter(v -> v.getAuthor().getId().equals(userId));
+            vacancyPage = vacancyRepository.findByAuthorId(userId, pageable);
+        } else {
+            vacancyPage = vacancyRepository.findAll(pageable);
         }
 
-        List<VacancyResponse> vacancies = vacancyResponseStream.toList();
+        List<VacancyResponse> content = vacancyPage.getContent().stream()
+                .map(vacancyMapper::toResponse)
+                .toList();
 
-        int totalElements = vacancies.size();
-        int totalPages = (int) Math.ceil((double) totalElements / size);
-        int fromIndex = page * size;
-        int toIndex = Math.min(fromIndex + size, totalElements);
-
-        List<VacancyResponse> pageContent = (fromIndex > toIndex) ? List.of() : vacancies.subList(fromIndex, toIndex);
-        return new PagedResponse<>(pageContent, page, size, totalElements, totalPages, page >= totalPages - 1);
+        return new PagedResponse<>(
+                content,
+                vacancyPage.getNumber(),
+                vacancyPage.getSize(),
+                (int) vacancyPage.getTotalElements(),
+                vacancyPage.getTotalPages(),
+                vacancyPage.isLast()
+        );
     }
 
+    @Transactional
     public VacancyResponse createVacancy(VacancyRequest vacancyRequest) {
-        UserResponse author = userService.findUserById(vacancyRequest.authorId());
+        User author = userService.findUserEntityById(vacancyRequest.authorId());
 
-        Long id = storage.vacancySequence.incrementAndGet();
-
-        VacancyResponse vacancy = new VacancyResponse(
-                id,
+        Vacancy vacancy = new Vacancy(
                 vacancyRequest.title(),
                 vacancyRequest.text(),
                 vacancyRequest.jobName(),
@@ -69,57 +80,56 @@ public class VacancyService {
                 author
         );
 
-        storage.vacancies.put(id, vacancy);
+        Vacancy savedVacancy = vacancyRepository.save(vacancy);
+        VacancyResponse vacancyResponse = vacancyMapper.toResponse(savedVacancy);
 
         VacancyCreatedEvent event = new VacancyCreatedEvent(
-                vacancy.getId(),
-                vacancy.getTitle(),
+                vacancyResponse.getId(),
+                vacancyResponse.getTitle(),
                 author.getFirstName() + " " + author.getLastName(),
-                vacancy.getJobName()
+                vacancyResponse.getJobName()
         );
         rabbitTemplate.convertAndSend(RabbitMQConfig.EXCHANGE_NAME, RabbitMQConfig.ROUTING_KEY_VACANCY_CREATED, event);
 
-        return vacancy;
+        return vacancyResponse;
     }
 
+    @Transactional
     public VacancyResponse updateVacancy(Long id, VacancyRequest vacancyRequest) {
-        VacancyResponse existingVacancy = findVacancyById(id);
+        Vacancy existingVacancy = vacancyRepository.findById(id)
+                .orElseThrow(() -> new ResourceNotFoundException("Vacancy", id));
 
-        UserResponse author = userService.findUserById(vacancyRequest.authorId());
+        User author = userService.findUserEntityById(vacancyRequest.authorId());
 
-        VacancyResponse updatedVacancy = new VacancyResponse(
-                id,
-                vacancyRequest.title(),
-                vacancyRequest.text(),
-                vacancyRequest.jobName(),
-                vacancyRequest.contactPhoneNumber(),
-                vacancyRequest.salary(),
-                existingVacancy.getCreatedAt(),
-                author
-        );
+        existingVacancy.setTitle(vacancyRequest.title());
+        existingVacancy.setText(vacancyRequest.text());
+        existingVacancy.setJobName(vacancyRequest.jobName());
+        existingVacancy.setContactNumber(vacancyRequest.contactPhoneNumber());
+        existingVacancy.setSalary(vacancyRequest.salary());
+        existingVacancy.setAuthor(author);
 
-        storage.vacancies.put(id, updatedVacancy);
-        return updatedVacancy;
+        Vacancy updatedVacancy = vacancyRepository.save(existingVacancy);
+        return vacancyMapper.toResponse(updatedVacancy);
     }
 
+    @Transactional
     public void deleteVacancy(Long id) {
-        VacancyResponse vacancy = findVacancyById(id);
-        UserResponse author = vacancy.getAuthor();
+        Vacancy vacancy = vacancyRepository.findById(id)
+                .orElseThrow(() -> new ResourceNotFoundException("Vacancy", id));
 
-        VacancyDeletedEvent event = new VacancyDeletedEvent(
-                vacancy.getId()
-        );
+        VacancyDeletedEvent event = new VacancyDeletedEvent(vacancy.getId());
         rabbitTemplate.convertAndSend(RabbitMQConfig.EXCHANGE_NAME, RabbitMQConfig.ROUTING_KEY_VACANCY_DELETED, event);
 
-        storage.vacancies.remove(id);
+        vacancyRepository.deleteById(id);
     }
 
+    @Transactional
     public void deleteAllVacanciesByAuthorId(Long userId) {
-        List<Long> vacanciesIdListToDelete = storage.vacancies.values().stream()
-                .filter(v -> v.getAuthor().getId().equals(userId))
-                .map(VacancyResponse::getId)
-                .toList();
-
-        vacanciesIdListToDelete.forEach(this::deleteVacancy);
+        List<Vacancy> vacancies = vacancyRepository.findByAuthorId(userId, Pageable.unpaged()).getContent();
+        vacancies.forEach(vacancy -> {
+            VacancyDeletedEvent event = new VacancyDeletedEvent(vacancy.getId());
+            rabbitTemplate.convertAndSend(RabbitMQConfig.EXCHANGE_NAME, RabbitMQConfig.ROUTING_KEY_VACANCY_DELETED, event);
+        });
+        vacancyRepository.deleteAll(vacancies);
     }
 }

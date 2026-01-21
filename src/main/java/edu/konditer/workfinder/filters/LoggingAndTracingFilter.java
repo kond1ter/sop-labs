@@ -13,8 +13,8 @@ import org.springframework.util.StringUtils;
 import java.io.IOException;
 import java.util.UUID;
 
-@Component
-@Order(1)
+// @Component // Отключено, используется Micrometer Tracing
+// @Order(1)
 public class LoggingAndTracingFilter implements Filter {
 
     private static final Logger log = LoggerFactory.getLogger(LoggingAndTracingFilter.class);

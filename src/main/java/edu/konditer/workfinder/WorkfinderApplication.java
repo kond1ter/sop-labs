@@ -7,7 +7,6 @@ import edu.konditer.workfinder_contracts.dto.VacancyRequest;
 import org.springframework.boot.CommandLineRunner;
 import org.springframework.boot.SpringApplication;
 import org.springframework.boot.autoconfigure.SpringBootApplication;
-import org.springframework.boot.autoconfigure.jdbc.DataSourceAutoConfiguration;
 import org.springframework.hateoas.config.EnableHypermediaSupport;
 import org.springframework.stereotype.Component;
 
@@ -16,8 +15,7 @@ import java.util.List;
 import java.util.Random;
 
 @SpringBootApplication(
-        scanBasePackages = {"edu.konditer.workfinder", "edu.konditer.workfinder_contracts"},
-        exclude = { DataSourceAutoConfiguration.class }
+        scanBasePackages = {"edu.konditer.workfinder", "edu.konditer.workfinder_contracts"}
 )
 @EnableHypermediaSupport(type = EnableHypermediaSupport.HypermediaType.HAL)
 public class WorkfinderApplication {
@@ -41,7 +39,7 @@ class DataGen implements CommandLineRunner {
         Random random = new Random();
 
         int usersQty = 50;
-        int vacanciesQty = 100;
+        int vacanciesQty = 10;
 
         List<String> firstNames = List.of("Александр", "Иван", "Артем", "Андрей");
         List<String> lastNames = List.of("Иванов", "Андреев", "Никитин", "Михайлов");
@@ -70,14 +68,24 @@ class DataGen implements CommandLineRunner {
 
         System.out.println("Creating vacancies...");
 
+        List<Long> userIds = userService.findAll().stream()
+                .map(user -> user.getId())
+                .toList();
+
+        if (userIds.isEmpty()) {
+            System.out.println("No users found, skipping vacancy creation.");
+            return;
+        }
+
         for (int i = 0; i < vacanciesQty; i++) {
+            Long randomUserId = userIds.get(random.nextInt(userIds.size()));
             VacancyRequest vacancy1 = new VacancyRequest(
                     vacTitles1.get(random.nextInt(vacTitles1.size())) + vacTitles2.get(random.nextInt(vacTitles2.size() - 1)),
                     vacTexts.get(random.nextInt(vacTexts.size())),
                     jobNames.get(random.nextInt(jobNames.size())),
                     vacContactNumbers.get(random.nextInt(vacContactNumbers.size())),
                     (double) random.nextInt(10, 100) * 100,
-                    (long) random.nextInt(1, usersQty)
+                    randomUserId
             );
             vacancyService.createVacancy(vacancy1);
         }
